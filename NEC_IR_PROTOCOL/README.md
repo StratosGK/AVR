@@ -1,4 +1,4 @@
-NEC IR Protocol for ATMega32A
+NEC IR Protocol for ATMega32A  
 	by Stratos Gkagkanis
 
 Hardware  
