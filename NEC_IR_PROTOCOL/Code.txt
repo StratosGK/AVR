@@ -1,0 +1,270 @@
+/*
+NEC IR Protocol for ATMega32A
+	by Stratos Gkagkanis
+
+Hardware
+Fcpu = 16MHz
+PA.0 = Button
+PD.5 = IR LED
+
+Software
+The code presented here creates pulse bursts in order to drive an IR LED.
+The IR Protocol used is "NEC Infared Transmission Protocol"
+The procedure is not hardcoded to send only a specific command.
+On/Off command of an LG TV is used as an example but it can send anything
+and with some modifications the program could send more than one commands.
+
+Η σειρά των εργασιών που γίνονται:
+
+1)Lead code transmission.
+  Pulse burst duration is 9ms and it is followed by 4.5ms of LOW signal.
+2)Data transmission, starting with the LSB.
+3)End code transmission.
+  Pulse burst duration is 564μs.
+
+Google for more info on NEC IR Protocol.
+*/
+
+.include "m32def.inc"
+
+;REGISTERS
+.def ZeroReg =		R2		;Register that is always zero
+.def Data =			R4		;Register with data to be transmitted
+.def TEMP = 		R16		;Temporary
+.def PWMcycles = 	R17		;PWM cycle counter
+.def leadCode =		R18		;lead code counter
+.def BitCount = 	R19		;Counter of bits transmitted
+.def T0Counter =	R20		;T0 overflow counter
+.def FlagReg =		R21		;Register with flags
+	;Flag Bits
+	.EQU PWMDone = 		0		;PWM has finished.
+	.EQU T0FLAG = 		1		;T0 has finished
+	.EQU BitState = 	2		;State of the bit to be transmitted. 1 = 1 | 0 = 0
+	.EQU D9FLAG =		3		;9ms lead code burst is finished.
+
+;Constants
+.EQU OCR1AVal = 	209		;PWM duty cycle = 50% | frequency = 38KHz
+.EQU LED = 			0
+.EQU BUTTON =		0
+
+
+
+.cseg
+.org $000				;Reset Vector
+	RJMP init
+
+.org $00E				;T1 COMPARE A Vector
+	RJMP T1_COMPA
+
+.org $014				;T0 CTC Vector
+	RJMP T0_CTC		
+
+.org $030
+init:		
+	LDI TEMP, low(RAMEND) 		
+	OUT SPL, TEMP
+	LDI TEMP, high(RAMEND)
+	OUT SPH, TEMP
+
+	SBI DDRD, 5
+	SBI PORTA, BUTTON
+
+	LDI TEMP, 0x00
+	MOV ZeroReg, TEMP
+
+	LDI TEMP, high(OCR1AVal)
+	OUT OCR1AH, TEMP
+	LDI TEMP, low(OCR1AVal)
+	OUT OCR1AL, TEMP
+
+	LDI TEMP, 140
+	OUT OCR0, TEMP
+
+	LDI TEMP, (1<< OCIE1A | 1<<OCIE0)
+	OUT TIMSK, TEMP
+	OUT TIFR, TEMP
+
+	SEI
+
+Prepare:	
+	LDI ZH, high(LG_ON_OFF <<1)
+	LDI ZL, low(LG_ON_OFF <<1)
+
+	LPM Data, Z
+
+	LDI BitCount, 8	
+	LDI leadCode, 16
+	LDI PWMcycles, 43
+
+	MOV FlagReg, ZeroReg
+
+Start:
+	SBIC PINA, BUTTON
+	RJMP Start	
+		
+	;Init & Start PWM
+	LDI TEMP, (1<<WGM11 | 1<<WGM10 | 1<<COM1A0)
+	OUT TCCR1A, TEMP
+	LDI TEMP, (1<<WGM13 | 1<<WGM12 | 1<<CS10)
+	OUT TCCR1B, TEMP					
+
+D9MSLoop:	
+	SBRS FlagReg, PWMDone		;Wait for PWM to be completed
+	RJMP D9MSLoop
+	
+	CBR FlagReg, 0b00000001		;PWMDone = 0
+									
+
+;Delay 4500us for lead code
+	LDI  R24, 94
+    LDI  R25, 122
+D4500us: 	
+	DEC R25
+    BRNE D4500us
+    DEC  R24
+    BRNE D4500us
+    NOP
+;Lead Code is OVER
+
+;Data Transmission Begins
+	;Init & Start PWM
+	LDI TEMP, (1<<WGM11 | 1<<WGM10 | 1<<COM1A0)
+	OUT TCCR1A, TEMP
+	LDI TEMP, (1<<WGM13 | 1<<WGM12 | 1<<CS10)
+	OUT TCCR1B, TEMP
+
+DataTR:
+	CPI BitCount, 0	
+	BREQ NewByte
+Next:
+	DEC BitCount
+	LSR Data
+	BRCC BitZero
+BitOne:
+	SBR FlagReg, 0b00000100	
+	RJMP W8_PWM	
+BitZero:
+	CBR FlagReg, 0b00000100
+	RJMP W8_PWM
+	
+NewByte:	
+	CPI ZL, 0x03
+	BREQ END
+	INC ZL
+	LPM Data, Z	
+	LDI BitCount, 8				
+	RJMP Next					
+
+W8_PWM:	
+	SBRS FlagReg, PWMDone		;Wait for PWM to be completed
+	RJMP W8_PWM
+
+	;Init & Start T0
+	LDI TEMP, (1<<CS01 | 1<<CS00 | 1<<WGM01)	;PRESCALER = 64, CTC mode
+	OUT TCCR0, TEMP
+
+	CBR FlagReg, 0b00000011		;PWMDone = 0 | T0FLAG = 0.
+
+	SBRS FlagReg, BitState
+	RJMP Zero
+One:
+	LDI T0Counter, 3
+	RJMP W8_T0
+Zero:
+	LDI T0Counter, 1
+W8_T0:
+	SBRS FlagReg, T0FLAG		;Wait for T0.
+	RJMP W8_T0					
+
+	RJMP DataTR					;Jumps back to DataTR to transmit the next bit
+
+
+END:
+;Data Transmission is OVER
+;750ms Delay for Debounce
+	LDI R23, 61
+	LDI R24, 225
+	LDI R25, 64
+D750ms:	DEC R25
+	BRNE D750ms
+	DEC R24
+	BRNE D750ms
+	DEC R23
+	BRNE D750ms
+	RJMP PC+1
+
+	RJMP Prepare
+
+
+
+
+/*
+T0 CTC ISR
+564μs:
+0.0000000625 * 64 * 141 = 0,000564s
+*/
+T0_CTC:
+	PUSH TEMP		
+	IN TEMP, SREG
+	PUSH TEMP
+
+	DEC T0Counter
+	BRNE T0Out
+	
+	OUT TCCR0, ZeroReg
+
+	LDI TEMP, (1<<WGM11 | 1<<WGM10 | 1<<COM1A0)
+	OUT TCCR1A, TEMP
+	LDI TEMP, (1<<WGM13 | 1<<WGM12 | 1<<CS10)
+	OUT TCCR1B, TEMP
+		
+	OUT TCNT0, ZeroReg
+
+	SBR FlagReg, 0b00000010
+
+T0Out:
+	POP TEMP
+	OUT SREG, TEMP
+	POP TEMP
+
+	RETI
+
+/*
+OCR1A Compare ISR (PWM)
+Frequency= 38KHz
+Duty Cycle = 50%
+Mode = 15
+*/
+T1_COMPA:
+	PUSH TEMP
+	IN TEMP, SREG
+	PUSH TEMP
+
+	DEC PWMcycles
+	BRNE PWMout
+		
+	SBRC FlagReg, D9FLAG
+	RJMP T1_Next
+	LDI PWMCycles, 43
+	DEC leadCode
+	BRNE PWMOut
+
+T1_Next:
+	OUT TCCR1A, ZeroReg
+	CBI PORTD, LED
+	OUT TCCR1B, ZeroReg
+	OUT TCNT1H, ZeroReg
+	OUT TCNT1L, ZeroReg
+	LDI PWMcycles, 43
+	SBR FlagReg, 0b00001001	;PWMDone = 1. | D9FLAG = 1. 
+
+PWMout:
+	POP TEMP
+	OUT SREG, TEMP
+	POP TEMP
+
+	RETI
+
+.ORG $200
+LG_ON_OFF:
+.db 0x04, 0xFB, 0x08, 0xF7
