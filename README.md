@@ -1,2 +1,3 @@
 # AVR
-In this repository i will be uploading various AVR projects i have completed.
+This repository hosts various projects i have completed.
+Most of them are written in Assembly.
